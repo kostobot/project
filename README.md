@@ -1,152 +1,93 @@
-# 📰 NewsPortal
+# Итоговое задание 5.1 (HW-03)
 
-## Итоговое задание 5.1 (HW‑03)
+## Отчёт о реализации асинхронной работы с запросами в приложении NewsPortal.
 
-### 📌 Тема
+### Задание 1. Реализовать рассылку уведомлений подписчикам категории после создания новости.
 
-Асинхронная обработка задач в Django с использованием **Celery** и
-**Redis**
+**Описание реализации:**
+При добавлении поста в категорию срабатывает сигнал m2m_changed, который запускает Celery-задачу для асинхронной рассылки email-уведомлений всем подписчикам категории. Отправка писем выполняется в фоне через Redis + Celery.
 
-------------------------------------------------------------------------
-
-## 🎯 Цель
-
--   Отправка email подписчикам при публикации новости\
--   Еженедельный дайджест (каждый **понедельник в 8:00**)
-
-------------------------------------------------------------------------
-
-## ⚙️ Настройка
-
-### 1) Установка
-
-``` bash
-pip install celery redis
-```
-
-### 2) Переменная окружения для Redis Cloud
-
-``` bash
-export REDIS_CLOUD="ВАШ_ПАРОЛЬ_ОТ_REDIS_CLOUD"
-```
-
-Windows (PowerShell):
-
-``` powershell
-setx REDIS_CLOUD "ВАШ_ПАРОЛЬ_ОТ_REDIS_CLOUD"
-```
-
-### 3) settings.py
-
-``` python
-import os
-
-CELERY_BROKER_URL = f"redis://:{os.environ.get('REDIS_CLOUD')}@redis-10218.c14.us-east-1-2.ec2.redns.redis-cloud.com:10218"
-CELERY_RESULT_BACKEND = f"redis://:{os.environ.get('REDIS_CLOUD')}@redis-10218.c14.us-east-1-2.ec2.redns.redis-cloud.com:10218"
-
-CELERY_ACCEPT_CONTENT = ['application/json']
-CELERY_TASK_SERIALIZER = 'json'
-CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = 'Europe/Moscow'
-```
-
-### 4) celery.py (в корне проекта)
-
-``` python
-import os
-from celery import Celery
-from celery.schedules import crontab
-
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'NewsPortal.settings')
-
-app = Celery('NewsPortal')
-app.config_from_object('django.conf:settings', namespace='CELERY')
-app.autodiscover_tasks()
-
-app.conf.beat_schedule = {
-    'weekly-digest': {
-        'task': 'news.tasks.send_weekly_digest',
-        'schedule': crontab(hour=8, minute=0, day_of_week='monday'),
-    },
-}
-```
-
-### 5) **init**.py
-
-``` python
-from .celery import app as celery_app
-__all__ = ('celery_app',)
-```
-
-------------------------------------------------------------------------
-
-## 📨 Уведомление о новой новости
-
-**signals.py**
-
-``` python
+**(`signals.py`):**
+```python
 @receiver(m2m_changed, sender=Post.category.through)
 def notify_users_new_post(sender, instance, action, **kwargs):
     if action == 'post_add':
         send_new_post_notifications.delay(instance.id)
 ```
 
-**tasks.py**
 
-``` python
+**(`tasks.py`):**
+```python
 @shared_task
 def send_new_post_notifications(post_id):
     post = Post.objects.get(pk=post_id)
-    for cat in post.category.all():
-        for user in cat.subscribers.all():
-            if user.email:
-                send_mail(
-                    f"Новый пост: {post.title}",
-                    post.text[:100],
-                    "from@mail.com",
-                    [user.email]
-                )
+    categories = post.category.all()
+
+    for category in categories:
+        subscribers = category.subscribers.all()
+
+        for user in subscribers:
+            if not user.email:
+                continue
+
+            subject = f'Новый пост в категории: {category.name}'
+            preview_text = post.text[:50] + ('...' if len(post.text) > 50 else '')
+
+            text_content = (
+                f'Здравствуй, {user.username}!\n'
+                f'Новая статья в твоём любимом разделе "{category.name}": {post.title}\n\n'
+                f'{preview_text}'
+            )
+
+            html_content = render_to_string(
+                'subscribe_new_post.html',
+                {'post': post, 'username': user.username, 'category': category.name}
+            )
+
+            email = EmailMultiAlternatives(
+                subject=subject,
+                body=text_content,
+                from_email='kastetpsy@yandex.ru',
+                to=[user.email],
+            )
+            email.attach_alternative(html_content, "text/html")
+            email.send()
 ```
 
-------------------------------------------------------------------------
+**Результат:**
+при публикации поста подписчики сразу получают email, задача выполняется асинхронно.
 
-## 🗓 Еженедельный дайджест
 
-**tasks.py**
+### Задание 2. Реализовать еженедельную рассылку с последними новостями (каждый понедельник в 8:00 утра)..
 
-``` python
-@shared_task
-def send_weekly_digest():
-    week = timezone.now() - timedelta(days=7)
-    posts = Post.objects.filter(created_at__gte=week)
+**Описание реализации:**
+Через Celery Beat настроен планировщик, который каждую неделю запускает задачу send_weekly_digest. Она формирует подборку постов за последние 7 дней и отправляет письма подписчикам соответствующих категорий.
 
-    for cat in Category.objects.all():
-        cat_posts = posts.filter(category=cat)
-        if cat_posts.exists():
-            for user in cat.subscribers.all():
-                if user.email:
-                    send_mail(
-                        f"Дайджест за неделю: {cat.name}",
-                        "\n".join(p.title for p in cat_posts),
-                        "from@mail.com",
-                        [user.email]
-                    )
+**(`celery.py`):**
+```python
+import os
+from celery import Celery
+from celery.schedules import crontab
+ 
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'NewsPortal.settings')
+ 
+app = Celery('NewsPortal')
+app.config_from_object('django.conf:settings', namespace = 'CELERY')
+
+app.autodiscover_tasks()
+
+app.conf.beat_schedule = {
+    'send-weekly-digest': {
+        'task': 'blog.tasks.send_weekly_digest',
+        'schedule': crontab(minute='00', hour='08', day_of_week='monday')
+    },
+}
 ```
 
-------------------------------------------------------------------------
+**Результат:**
+рассылка автоматически отправляется раз в неделю по расписанию.
 
-## ▶️ Запуск
-
-``` bash
+**Запуск задач:**
 python manage.py runserver
 celery -A NewsPortal worker --pool=solo -l info
 celery -A NewsPortal beat -l info
-```
-
-------------------------------------------------------------------------
-
-## ✅ Итог
-
--   Асинхронные письма ✅\
--   Планировщик рассылки ✅\
--   Интеграция Django + Celery + Redis ✅
