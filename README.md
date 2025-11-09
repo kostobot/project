@@ -1,72 +1,56 @@
-# 📰 NewsPortal --- Асинхронные задачи с Celery и Redis
+# 📰 NewsPortal
 
-## 📌 Итоговое задание 5.1 (HW‑03)
+## Итоговое задание 5.1 (HW‑03)
+
+### 📌 Тема
+
+Асинхронная обработка задач в Django с использованием **Celery** и
+**Redis**
 
 ------------------------------------------------------------------------
 
 ## 🎯 Цель
 
-Реализовать асинхронную обработку задач в проекте **NewsPortal
-(Django)** с использованием:
-
--   **Celery** --- для фоновой обработки задач
--   **Redis** --- как брокер задач
--   **Celery Beat** --- для планирования периодических задач
+-   Отправка email подписчикам при публикации новости\
+-   Еженедельный дайджест (каждый **понедельник в 8:00**)
 
 ------------------------------------------------------------------------
 
-## ✨ Реализованный функционал
+## ⚙️ Настройка
 
-1.  **Email‑уведомления подписчикам при появлении новой новости** (с
-    использованием `m2m_changed` сигнала + Celery task).
-2.  **Еженедельная рассылка дайджеста** новых постов в категориях, на
-    которые подписан пользователь (каждый **понедельник в 8:00 MSK**).
-3.  Асинхронная отправка писем **не блокирует основной поток
-    приложения**.
-4.  Полная интеграция **Django + Celery + Redis + Celery Beat**.
+### 1) Установка
 
-------------------------------------------------------------------------
-
-## ⚙️ Настройка окружения
-
-### 1. Установка зависимостей
-
-``` sh
-pip install celery redis django
+``` bash
+pip install celery redis
 ```
 
-### 2. Установка и запуск Redis
+### 2) Переменная окружения для Redis Cloud
 
-Если Redis не установлен:
-
-``` sh
-sudo apt update
-sudo apt install redis
+``` bash
+export REDIS_CLOUD="ВАШ_ПАРОЛЬ_ОТ_REDIS_CLOUD"
 ```
 
-Запуск:
+Windows (PowerShell):
 
-``` sh
-sudo service redis-server start
+``` powershell
+setx REDIS_CLOUD "ВАШ_ПАРОЛЬ_ОТ_REDIS_CLOUD"
 ```
 
-------------------------------------------------------------------------
-
-## 🛠 Конфигурация Django
-
-### `settings.py`
+### 3) settings.py
 
 ``` python
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+import os
 
-CELERY_ACCEPT_CONTENT = ['json']
+CELERY_BROKER_URL = f"redis://:{os.environ.get('REDIS_CLOUD')}@redis-10218.c14.us-east-1-2.ec2.redns.redis-cloud.com:10218"
+CELERY_RESULT_BACKEND = f"redis://:{os.environ.get('REDIS_CLOUD')}@redis-10218.c14.us-east-1-2.ec2.redns.redis-cloud.com:10218"
+
+CELERY_ACCEPT_CONTENT = ['application/json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = 'Europe/Moscow'
 ```
 
-### `celery.py` (в корне проекта)
+### 4) celery.py (в корне проекта)
 
 ``` python
 import os
@@ -80,14 +64,14 @@ app.config_from_object('django.conf:settings', namespace='CELERY')
 app.autodiscover_tasks()
 
 app.conf.beat_schedule = {
-    'send-weekly-digest': {
+    'weekly-digest': {
         'task': 'news.tasks.send_weekly_digest',
-        'schedule': crontab(minute=0, hour=8, day_of_week='monday'),
+        'schedule': crontab(hour=8, minute=0, day_of_week='monday'),
     },
 }
 ```
 
-### `__init__.py`
+### 5) **init**.py
 
 ``` python
 from .celery import app as celery_app
@@ -96,9 +80,9 @@ __all__ = ('celery_app',)
 
 ------------------------------------------------------------------------
 
-## 🔔 1. Уведомление при создании новости
+## 📨 Уведомление о новой новости
 
-### `signals.py`
+**signals.py**
 
 ``` python
 @receiver(m2m_changed, sender=Post.category.through)
@@ -107,113 +91,62 @@ def notify_users_new_post(sender, instance, action, **kwargs):
         send_new_post_notifications.delay(instance.id)
 ```
 
-### `tasks.py`
+**tasks.py**
 
 ``` python
 @shared_task
 def send_new_post_notifications(post_id):
     post = Post.objects.get(pk=post_id)
-    categories = post.category.all()
-
-    for category in categories:
-        subscribers = category.subscribers.all()
-
-        for user in subscribers:
-            if not user.email:
-                continue
-
-            subject = f'Новый пост в категории: {category.name}'
-            preview_text = post.text[:50] + ('...' if len(post.text) > 50 else '')
-
-            text_content = (
-                f'Здравствуй, {user.username}!\n'
-                f'Новая статья в твоём любимом разделе \"{category.name}\": {post.title}\n\n'
-                f'{preview_text}'
-            )
-
-            html_content = render_to_string(
-                'subscribe_new_post.html',
-                {'post': post, 'username': user.username, 'category': category.name}
-            )
-
-            email = EmailMultiAlternatives(
-                subject=subject,
-                body=text_content,
-                from_email='your_email@example.com',
-                to=[user.email],
-            )
-            email.attach_alternative(html_content, "text/html")
-            email.send()
+    for cat in post.category.all():
+        for user in cat.subscribers.all():
+            if user.email:
+                send_mail(
+                    f"Новый пост: {post.title}",
+                    post.text[:100],
+                    "from@mail.com",
+                    [user.email]
+                )
 ```
 
 ------------------------------------------------------------------------
 
-## 📬 2. Еженедельный дайджест
+## 🗓 Еженедельный дайджест
 
-### `tasks.py`
+**tasks.py**
 
 ``` python
 @shared_task
 def send_weekly_digest():
-    today = timezone.now()
-    last_week = today - timedelta(days=7)
-    posts = Post.objects.filter(created_at__gte=last_week)
+    week = timezone.now() - timedelta(days=7)
+    posts = Post.objects.filter(created_at__gte=week)
 
-    for category in Category.objects.all():
-        category_posts = posts.filter(category=category)
-        if not category_posts.exists():
-            continue
-
-        subscribers = category.subscribers.all()
-        for user in subscribers:
-            html_content = render_to_string(
-                'weekly_digest.html',
-                {'posts': category_posts, 'username': user.username, 'category': category.name}
-            )
-
-            email = EmailMultiAlternatives(
-                subject=f'Подборка новостей за неделю — {category.name}',
-                body='',
-                from_email='your_email@example.com',
-                to=[user.email],
-            )
-            email.attach_alternative(html_content, "text/html")
-            email.send()
+    for cat in Category.objects.all():
+        cat_posts = posts.filter(category=cat)
+        if cat_posts.exists():
+            for user in cat.subscribers.all():
+                if user.email:
+                    send_mail(
+                        f"Дайджест за неделю: {cat.name}",
+                        "\n".join(p.title for p in cat_posts),
+                        "from@mail.com",
+                        [user.email]
+                    )
 ```
 
 ------------------------------------------------------------------------
 
-## 🚀 Запуск проекта
+## ▶️ Запуск
 
-Запустить **каждую команду в отдельном терминале**:
-
-``` sh
-# 1. Django сервер
+``` bash
 python manage.py runserver
-
-# 2. Celery worker
 celery -A NewsPortal worker --pool=solo -l info
-
-# 3. Планировщик (Celery Beat)
 celery -A NewsPortal beat -l info
 ```
 
 ------------------------------------------------------------------------
 
-## ✅ Результат
+## ✅ Итог
 
-  Функция                               Статус
-  ------------------------------------ --------
-  Отправка email при создании поста       ✅
-  Рассылка подписчикам по категориям      ✅
-  Асинхронная обработка                   ✅
-  Еженедельный дайджест (пн, 08:00)       ✅
-  Redis как брокер                        ✅
-  Celery Beat для планирования            ✅
-
-------------------------------------------------------------------------
-
-## ⭐ Готово!
-
-Проект полностью настроен и выполняет задачи асинхронно, не блокируя
-основной поток Django 🚀
+-   Асинхронные письма ✅\
+-   Планировщик рассылки ✅\
+-   Интеграция Django + Celery + Redis ✅
