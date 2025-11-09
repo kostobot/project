@@ -88,6 +88,8 @@ app.conf.beat_schedule = {
 рассылка автоматически отправляется раз в неделю по расписанию.
 
 **Запуск задач:**
+```bash
 python manage.py runserver
 celery -A NewsPortal worker --pool=solo -l info
 celery -A NewsPortal beat -l info
+```
